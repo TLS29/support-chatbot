@@ -14,6 +14,7 @@ const main = async () => {
   - Si NO sabes algo o no tienes la información, NO la inventes. Di: "No tengo esa información, déjame conectarte con un humano 🍕".
   - No inventes precios, promociones ni datos del menú. Si te preguntan algo específico que no sabes, escala a un humano.
   - Sé breve y directo. No des respuestas larguísimas.
+  - Si no tienes información, de algo del menu, NO LO INVENTES, ya que podria llegar a meter en problemas al negocio si se ofrece algo que no existe, solo la info que sepas que es verdad dila, si no contacta con un humano
   `.trim();
 
   if (!apiKey) {
@@ -27,28 +28,55 @@ const main = async () => {
   const historial: Content[] = [];
 
   while (true) {
-    // Pide input al usuario y ESPERA (await) hasta que escriba algo y dé Enter
-    const mensaje = await rl.question("> ");
+    try {
+      // Pide input al usuario y ESPERA (await) hasta que escriba algo y dé Enter
+      const mensaje = await rl.question("> ");
 
-    // Salida limpia si el usuario escribe "exit"
-    if (mensaje.trim().toLowerCase() === "exit") {
-      break; // rompe el while y seguimos abajo
+      // Salida limpia si el usuario escribe "exit"
+      if (mensaje.trim().toLowerCase() === "exit") {
+        break; // rompe el while y seguimos abajo
+      }
+
+      historial.push({ role: "user", parts: [{ text: mensaje }] });
+
+      // Misma llamada de siempre (todavía SIN historial — solo el mensaje actual)
+      const response = await ai.models.generateContentStream({
+        model: "gemini-2.5-flash-lite",
+        contents: historial,
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+        },
+      });
+
+      let fullText = "";
+
+      for await (const chunk of response) {
+        const t = chunk.text;
+
+        if (t) {
+          process.stdout.write(t);
+          fullText += t;
+        }
+      }
+
+      process.stdout.write("\n\n");
+
+      historial.push({ role: "model", parts: [{ text: fullText }] });
+    } catch (error) {
+      historial.pop();
+
+      const status = (error as { status?: number }).status;
+
+      if (status === 429) {
+        console.log(
+          "< ¡Uy! 😅 Justo ahora tengo mucha demanda y no puedo responderte bien. Dame unos minutos y vuelve a escribirme, ¿va? 🍕\n",
+        );
+      } else {
+        console.log(
+          "< ¡Ups! Estoy teniendo un problemita técnico en este momento. Por favor inténtalo de nuevo en un ratito. 🙏\n",
+        );
+      }
     }
-
-    historial.push({ role: "user", parts: [{ text: mensaje }] });
-
-    // Misma llamada de siempre (todavía SIN historial — solo el mensaje actual)
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: historial,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-      },
-    });
-
-    historial.push({ role: "model", parts: [{ text: response.text ?? "" }] });
-
-    console.log(`< ${response.text}\n`);
   }
 };
 
