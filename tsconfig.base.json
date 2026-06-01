@@ -1,0 +1,32 @@
+{
+  // Config base compartida por todos los packages del monorepo.
+  // Cada package extiende este y agrega lo específico suyo.
+  "compilerOptions": {
+    // --- Target y módulos ---
+    "target": "esnext",
+    "module": "preserve", // Permite imports sin .js; tsup hace el bundling final.
+    "moduleResolution": "bundler", // Resuelve igual que un bundler (Vite/tsup), no como Node puro.
+    "moduleDetection": "force", // Trata todo .ts como módulo (evita problemas con archivos sin imports).
+
+    // --- Interoperabilidad ---
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true, // Distingue import type vs import — más seguro con ESM.
+    "isolatedModules": true, // Asegura compatibilidad con compiladores que procesan archivos uno a uno (tsup, esbuild).
+
+    // --- Strict máximo ---
+    "strict": true,
+    "noUncheckedIndexedAccess": true, // arr[0] es T | undefined; te salva de bugs.
+    "exactOptionalPropertyTypes": true, // { foo?: string } no admite { foo: undefined } explícitamente.
+    "noImplicitOverride": true, // override keyword obligatorio en métodos sobreescritos.
+    "noUncheckedSideEffectImports": true, // Errores explícitos en import "side-effect" sin tipos.
+
+    // --- Higiene de compilación ---
+    "skipLibCheck": true, // No re-chequea .d.ts de libs (compila más rápido).
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "declaration": false, // No emitimos .d.ts en api/shared (tsup decide).
+
+    // --- Tipos globales ---
+    "types": ["node"]
+  }
+}

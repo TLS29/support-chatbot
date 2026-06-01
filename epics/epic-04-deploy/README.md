@@ -1,163 +1,360 @@
-# Epic 04 — Deploy + demo público
+# Epic 04 — Deploy + handover al cliente
 
 **Estimación:** 2-3 días.
 
 ## Goal
 
-Tener un demo público accesible por URL, con buen README de portafolio, listo para mostrar en Fiverr.
+Tener el flow completo de entrega listo: deployar el monorepo completo (api + chroma + widget estático + caddy con HTTPS automático) en un droplet de DigitalOcean. Handover doc profesional + video Loom + procedimiento de revocación de acceso. Y listing de Fiverr listo para vender.
 
-Al terminar esta épica tienes un producto vendible: una URL que un cliente potencial puede abrir y ver el bot funcionando, y un README que vende.
+Al final, **tu primer gig en Fiverr es un proceso operacional repetible**, no improvisación.
 
 ## Conceptos cubiertos
 
-- Hosting de backend Node.js (Railway / Render / Fly.io vs Vercel serverless).
-- Hosting de frontend estático (Vercel / Netlify / Cloudflare Pages).
-- Variables de entorno en producción.
-- Domain + HTTPS.
-- Demo data y storytelling: cómo presentar un proyecto técnico para audiencia no-técnica.
+- Multi-service docker-compose (api + chroma + caddy).
+- Caddy como reverse proxy + servidor de estáticos + HTTPS automático con Let's Encrypt.
+- VPS provisioning en DigitalOcean.
+- Multi-tenant demo (3 verticales).
+- Handover doc + video Loom + revocación de accesos.
+- Fiverr listing y packaging.
 
 ## Pre-requisitos
 
-- Epic 03 completa.
-- Cuenta en alguna plataforma de hosting (Railway, Render, Fly.io).
-- Cuenta de Vercel (para frontend).
+- Epic 03 completa (widget + API funcionando localmente con docker-compose).
+- Cuenta personal en DigitalOcean (para tu demo público).
+- Dominio (o subdominio gratis de Cloudflare; o uno barato de Namecheap, ~$10/año).
+- Cuenta de Loom (gratis).
 
 ## Tickets
 
-### 04.1 — Decidir plataforma de hosting
+### 04.1 — Decidir hosting con el cliente
 
-Trade-offs:
+NO es código, es proceso. Pero importa para tu workflow.
 
-- **Railway / Render** — buenos para servidores Node persistentes. Necesitamos esto porque mantenemos sesiones en memoria + Chroma corriendo. Free tier limitado pero suficiente para demo.
-- **Vercel** — buenísimo para frontend estático. Sus serverless functions tienen timeout de 10s en free tier — mata el streaming largo, no las uses para el backend del chatbot.
-- **Fly.io** — más control, Docker nativo, free tier decente.
+Tres scenarios típicos:
 
-**Recomendación:** Render para el backend (free tier suficiente para demo), Vercel para el frontend estático.
+**Scenario A — Cliente con server existente** (~10%):
+Te da SSH/IAM limitado. Deployas. Hand off.
 
-**Sobre Chroma:** necesita correr en algún lado. Opciones:
+**Scenario B — Cliente sin server pero técnico** (~20%):
+Le ayudas a abrir cuenta en DigitalOcean/Hetzner a SU nombre, SU billing. Deployas. Hand off.
 
-- Chroma Cloud (managed, free tier limitado a 1GB).
-- Levantar Chroma como segundo servicio en Render (con Docker).
-- Cambiar a Pinecone (free tier: 1 índice, 100k vectores).
+**Scenario C — Cliente sin server, no técnico** (~70%):
+Tú creás el VPS a su nombre con sus datos de pago. Deployas. Hand off + instrucciones para administrar.
 
-**Recomendación:** Pinecone para el demo público (más simple de operar y free tier suficiente). Si querés mantener Chroma, usá Chroma Cloud.
+En los tres: el cliente paga su infraestructura directamente al proveedor. **NO sos su proveedor de hosting**.
 
-Documenta tu decisión.
+Para tu **demo público** (lo que muestras en Fiverr): tu propia cuenta de DigitalOcean. ~$6/mes. Se amortiza con 1 venta.
 
-### 04.2 — Preparar el backend para producción
+### 04.2 — docker-compose multi-service
 
-Antes de deployar, asegúrate de que:
+Actualiza `docker-compose.yml` raíz con los tres servicios:
 
-- **Variables de entorno**: todas las keys leen de `process.env`, nada hardcoded.
-- **Validación al boot**: si falta `GEMINI_API_KEY`, crashea con mensaje claro. No te quedés con un error misterioso a las 3 horas.
-- **CORS restringido**: solo permite el dominio del frontend en producción. En desarrollo seguís con `*`.
-- **Logging básico**: imprime cada request (método, path, status) y errores con stack.
-- **Healthcheck**: endpoint `GET /health` que devuelve 200.
+```yaml
+services:
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    expose: ["3000"]               # solo red interna
+    env_file: .env
+    restart: unless-stopped
+    depends_on: [chroma]
 
-**Deep-dive a Claude Code:** _"Prepara el backend para producción: validación de env al boot con zod o checks manuales que crasheen si falta GEMINI_API_KEY o PINECONE_API_KEY (o las que uses), CORS restringido vía variable de entorno FRONTEND_URL, logging básico con console.log estructurado (incluyendo timestamps), endpoint GET /health que devuelve 200 OK."_
+  chroma:
+    image: chromadb/chroma
+    expose: ["8000"]               # solo red interna
+    volumes:
+      - chroma-data:/chroma/chroma
+    restart: unless-stopped
 
-### 04.3 — Deploy del backend
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]    # único expuesto al host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+      - ./packages/api/public:/srv/public:ro
+    restart: unless-stopped
+    depends_on: [api]
 
-Sigue los docs de la plataforma elegida. Pasos generales para Render:
+volumes:
+  chroma-data:
+  caddy-data:
+  caddy-config:
+```
 
-1. Conecta el repo de GitHub.
-2. Configura como Node web service.
-3. Build command: `pnpm install && pnpm build`.
-4. Start command: `pnpm start`.
-5. Variables de entorno: agrega `GEMINI_API_KEY`, `PINECONE_API_KEY` (o lo que uses), `FRONTEND_URL`, etc.
-6. Espera el deploy (~5-10 min la primera vez).
+**Note importante:** `expose` (solo red interna del compose) vs `ports` (host). Solo Caddy es accesible públicamente. API y Chroma viven en la red interna.
 
-Verifica con `curl https://tu-app.onrender.com/health` → debe devolver 200.
+**Deep-dive a Claude Code:** _"Actualiza docker-compose.yml raíz a multi-service: api (build packages/api/Dockerfile, expose 3000), chroma (expose 8000, volumen persistente), caddy (image caddy:2-alpine, ports 80/443, volúmenes Caddyfile + caddy-data + caddy-config + read-only mount de packages/api/public). Solo Caddy expuesto al host. depends_on en orden chroma → api → caddy."_
 
-Si usas Pinecone (o Chroma Cloud), re-ingestá los docs apuntando a esa instancia antes de probar el chat.
+### 04.3 — Caddyfile (HTTPS automático)
 
-### 04.4 — Deploy del frontend
+`Caddyfile` en raíz:
 
-Si elegiste Vercel:
+```
+{$DOMAIN} {
+    # Widget estático: Caddy lo sirve directo (más rápido que Express)
+    handle /widget/* {
+        root * /srv/public
+        file_server
+    }
 
-1. `pnpm dlx vercel` desde la carpeta del frontend (o conectá el repo desde el dashboard).
-2. Configurá la URL del backend como variable de entorno (o reemplazá en el JS antes de buildear).
-3. Verificá que el widget cargue y conecte al backend live.
+    handle /demo/* {
+        root * /srv/public
+        file_server
+    }
 
-### 04.5 — Demo data multi-negocio
+    # API: reverse proxy a Express
+    handle /api/* {
+        reverse_proxy api:3000
+    }
 
-Crea 2-3 sets de demo data en `docs/`:
+    handle /health/* {
+        reverse_proxy api:3000
+    }
 
-- `docs/pizzeria/` — el set de Epic 02.
-- `docs/dentista/` — clínica dental ficticia (servicios, horarios, ubicación, precios orientativos).
-- `docs/ecommerce/` — tienda de ropa online ficticia (envíos, devoluciones, métodos de pago, tallas).
+    # Fallback
+    handle {
+        respond "Chatbot API · {$DOMAIN}" 200
+    }
 
-Crea un selector simple en el frontend del demo público para cambiar entre negocios. Cada set tiene su propia colección/índice en la vector DB. Tu backend identifica cuál usar por una variable en el request o un path.
+    encode gzip
+    log
+}
+```
 
-**Concepto clave:** muestra que el patrón funciona para distintos verticales. Es lo que un cliente de Fiverr necesita ver para pensar "ah, también sirve para mi negocio". Sin esto, parece un demo de pizzería que funciona solo para pizzerías.
+`DOMAIN` viene de `.env` (ej. `api.cliente.com`).
 
-### 04.6 — README de portafolio
+Caddy obtiene certificado de Let's Encrypt automáticamente la primera vez que arranca (cuando el dominio resuelve al IP del droplet).
 
-Reescribe el README del repo orientado a impresionar a un cliente potencial (no solo a un dev). Estructura sugerida:
+**Concepto clave:** Caddy en este setup hace 3 cosas:
+1. Reverse proxy a `/api/*` y `/health/*`.
+2. Servidor de estáticos para `/widget/*` y `/demo/*` (más rápido que Express).
+3. HTTPS automático con Let's Encrypt (cero configuración manual).
 
-1. **Una línea**: qué hace el bot en una frase.
-2. **GIF o captura**: el bot en acción (autoplay si es GIF, sin sonido).
-3. **Demo URL**: bien visible.
-4. **Stack** con badges.
-5. **"Qué problemas resuelve para tu negocio"**: en lenguaje de negocio, no técnico ("responde el 80% de consultas comunes sin que tu equipo intervenga", "atiende 24/7", "se entrena con tus propios documentos en 5 minutos").
-6. **"Cómo lo integro a mi sitio"**: el snippet de embed con 1 línea de copy-paste.
-7. **Casos de uso**: lista con los 3 sets demo (pizzería, dentista, ecommerce).
-8. **Cómo está hecho** (sección colapsable o al final, para devs curiosos).
+**Deep-dive a Claude Code:** _"Crea Caddyfile en raíz que: usa {$DOMAIN} de env, handle /widget/* y /demo/* sirviendo desde /srv/public (file_server), handle /api/* y /health/* reverse_proxy a api:3000, fallback 200 con 'Chatbot API'. encode gzip. log enabled. Documenta cómo Let's Encrypt se obtiene automático cuando el DNS apunta correctamente."_
 
-**Concepto clave:** este README va a ser linkeado desde tu perfil de Fiverr. Tiene que vender, no solo documentar. Cliente potencial llega aquí desde Fiverr y debe entender "qué es y para qué me sirve" en 10 segundos.
+### 04.4 — Provisioning del droplet
 
-### 04.7 — Video corto de demo
+Documenta en `docs/deploy.md`:
 
-Graba 60-90 segundos mostrando:
+```bash
+# 1. Crear droplet en DigitalOcean
+#    - Ubuntu 22.04 LTS
+#    - Plan básico $6/mes (1GB RAM, 25GB disk)
+#    - Región más cercana al cliente
+#    - SSH key del cliente añadida
 
-1. Apertura del widget en una página de prueba.
-2. Pregunta común → respuesta correcta y rápida (streaming visible).
-3. Pregunta fuera de dominio → "no tengo esa info".
-4. Cambio entre negocios (pizzería → dentista) para mostrar versatilidad.
+# 2. Apuntar DNS A record api.cliente.com → IP del droplet
+#    (En el proveedor de dominio del cliente)
 
-Sube a YouTube como "unlisted" o Loom. Linkéalo desde:
+# 3. SSH al droplet como root
+ssh root@<ip>
 
-- El README del repo.
-- Tu perfil de Fiverr.
-- Tu LinkedIn.
+# 4. Update + install Docker
+apt update && apt upgrade -y
+curl -fsSL https://get.docker.com | sh
 
-**Concepto clave:** el video es lo que más convierte en Fiverr. Los clientes no leen READMEs largos — ven 30 segundos de video y deciden.
+# 5. Clonar el repo
+cd /opt
+git clone <repo-url> chatbot
+cd chatbot
+
+# 6. Crear .env del cliente
+cat > .env <<'EOF'
+NODE_ENV=production
+PORT=3000
+DOMAIN=api.cliente.com
+GEMINI_API_KEY=...
+SYSTEM_PROMPT="Eres el bot de soporte de Pizzería..."
+ALLOWED_ORIGINS=https://cliente.com,https://www.cliente.com
+CHROMA_URL=http://chroma:8000
+SIMILARITY_THRESHOLD=0.3
+RATE_LIMIT_PER_MIN=10
+MAX_HISTORY_MESSAGES=40
+LOG_LEVEL=info
+EOF
+
+# 7. Build widget primero (el api Dockerfile no lo construye)
+docker run --rm -v $(pwd):/app -w /app node:20-alpine sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm --filter widget build"
+# (O si tienes Node + pnpm en el host, simplemente: pnpm install && pnpm --filter widget build)
+
+# 8. Levantar todo
+docker compose up -d --build
+
+# 9. Esperar ~30 segundos a que Caddy obtenga el certificado de Let's Encrypt
+
+# 10. Ingestar docs del cliente
+docker compose exec api pnpm ingest
+
+# 11. Verificar
+curl https://api.cliente.com/health/live
+```
+
+**Concepto clave:** del "droplet vacío" a "bot funcionando con HTTPS" toma ~20 minutos una vez que tienes la mecánica. Documentalo bien — lo vas a hacer 20 veces.
+
+### 04.5 — Demo público multi-negocio
+
+Para tu PROPIO demo (no de cliente), prepara 3 sets de docs:
+
+```
+docs/
+├── pizzeria/
+├── dentista/
+└── ecommerce/
+```
+
+Cada uno con su propia colección en Chroma (`support-knowledge-pizzeria`, `support-knowledge-dentista`, `support-knowledge-ecommerce`).
+
+Esto requiere un pequeño extension del API: aceptar un `businessId` opcional en `ChatRequest` que se mapea a la colección a usar. Update mínimo en:
+- `packages/shared/src/api-contract.ts`: agregar `businessId?: string` a `ChatRequest`.
+- `SendMessageUseCase`: aceptar `businessId` y pasarlo al `KnowledgeRepository`.
+- `ChromaKnowledgeRepository`: aceptar el nombre de la colección como parámetro.
+
+En el widget del demo, agrega un selector que cambia el `businessId` que se manda.
+
+**Concepto clave:** muestra a clientes que tu producto funciona en varios verticales, no solo pizzerías. Diferencia entre "demo de pizzería" y "infraestructura para cualquier soporte".
+
+**Deep-dive a Claude Code:** _"Extiende ChatRequest en packages/shared para incluir businessId?. Update SendMessageUseCase y ChromaKnowledgeRepository para aceptar el nombre de la colección dinámicamente. En packages/widget/src/App.tsx agrega un selector simple de negocio que cambia el businessId. Crea 3 sets de docs en docs/pizzeria/, docs/dentista/, docs/ecommerce/ con info inventada coherente."_
+
+### 04.6 — Handover doc template
+
+Crea `templates/handover-template.md`. Por cada cliente real generas un PDF customizado.
+
+Estructura:
+
+```
+# Handover · {Nombre del cliente}
+
+## Resumen ejecutivo (1 página, lenguaje no técnico)
+- Qué hace tu bot
+- Dónde vive (URL)
+- Canales activos
+- Limitaciones conocidas
+
+## Credenciales y accesos
+- Hosting: {proveedor} droplet "{nombre}"
+  - Cuenta: del cliente, login en {proveedor}.com
+- API key de Gemini: del cliente, login en aistudio.google.com
+- DNS: proveedor del cliente; record api.cliente.com → IP del droplet
+
+## Operación diaria
+- Verificar vivo: https://api.cliente.com/health/live (debe decir "ok")
+- Ver logs: ssh al droplet → docker compose logs api -f
+- Reiniciar: docker compose restart api
+- Apagar/encender: docker compose down / up -d
+
+## Mantenimiento
+- Actualizar docs del bot:
+  1. Editar archivos en /opt/chatbot/docs/
+  2. docker compose exec api pnpm ingest
+- Cambiar system prompt:
+  1. Editar SYSTEM_PROMPT en /opt/chatbot/.env
+  2. docker compose restart api
+- Cambiar branding del widget:
+  - Editar VITE_BOT_NAME, VITE_PRIMARY_COLOR en /opt/chatbot/.env del widget
+  - Re-build: pnpm --filter widget build
+  - docker compose restart caddy (para recargar estáticos)
+
+## Seguridad: cómo revocar mi acceso
+Al terminar el proyecto, cuando ya no querás que tenga acceso:
+1. Cambiar password de {proveedor de hosting}
+2. Rotar la API key de Gemini (regenerar en aistudio.google.com)
+3. Eliminar mi SSH key del droplet:
+   ssh root@<ip>
+   nano ~/.ssh/authorized_keys
+   (eliminar la línea que dice "ssh-rsa ... jonathan@...")
+4. Verificar: intentar conectar conmigo debe fallar
+
+## Soporte
+- Incluido en el paquete: {N} días post-entrega
+- Después: ${X}/hora o paquete mensual de mantenimiento
+- Contacto: tu@email.com
+```
+
+**Concepto clave:** este doc es lo que más te diferencia. La mayoría entrega código y se va. Tú entregás manual + procedimiento de revocación = profesionalismo nivel agency.
+
+### 04.7 — Loom video de handover
+
+Graba 5-10 minutos:
+
+1. (1 min) Saludo + qué construiste.
+2. (2 min) Tour de la web con el widget funcionando.
+3. (1 min) Cómo verificar vivo.
+4. (2 min) Cómo actualizar docs (editar + `pnpm ingest`).
+5. (1 min) Dónde está el handover doc + procedimiento de revocación.
+6. (30 seg) Cómo contactarte.
+
+Sube como "unlisted" en Loom (gratis). Linkéalo desde el handover doc.
+
+**Concepto clave:** el video convierte más que el PDF. Clientes ven 30 segundos y entienden.
+
+### 04.8 — README de portafolio + Fiverr listing
+
+Reescribe el README principal del repo para clientes potenciales (no devs):
+
+1. Una línea: qué hace.
+2. GIF/captura: bot funcionando.
+3. Demo URL bien visible.
+4. Stack (badges visuales).
+5. **Qué problemas resuelve** (lenguaje de negocio, no técnico).
+6. **Cómo se integra** (1 línea de embed: `<script src="..."></script>`).
+7. **Casos de uso**: links a los 3 sets demo.
+8. Cómo está hecho (sección colapsable al final para devs curiosos).
+
+Para Fiverr:
+
+- **Title:** "AI customer support chatbot trained on YOUR business documents"
+- **3 packages:**
+  - **Básico** ($80-150): bot con tus FAQs, deployado en VPS ya existente.
+  - **Completo** ($200-400): incluye widget de web + setup completo de VPS.
+  - **Premium** ($500-1000): incluye 1 canal extra (WhatsApp) + 14 días de soporte.
+- **Pricing inicial:** empezá bajo para conseguir primeras reviews, subí después.
 
 ## Definition of Done
 
-- [ ] Backend live en URL pública con HTTPS
-- [ ] Frontend live en URL pública con HTTPS
-- [ ] Bot funciona end-to-end en producción (no solo localhost)
-- [ ] 3 sets de demo data cargados, selector funcional en el demo público
-- [ ] README de portafolio listo (con captura/gif, demo URL, stack, casos de uso)
-- [ ] Video demo grabado y linkeado
-- [ ] Todo el código pushed a GitHub
-- [ ] Rate limits del free tier de Gemini monitoreados (si el demo recibe tráfico real, pegás contra el límite rápido)
+- [ ] Demo público live en HTTPS (Caddy + Let's Encrypt)
+- [ ] Widget embebido en demo público (3 verticales seleccionables)
+- [ ] Multi-business funciona end-to-end
+- [ ] `templates/handover-template.md` listo
+- [ ] Video Loom de handover grabado (template para customizar por cliente)
+- [ ] README de portafolio listo
+- [ ] Gig de Fiverr publicado o draft listo
+- [ ] `docs/deploy.md` con procedimiento paso a paso
+- [ ] Commits por ticket
 
 ## Lo que aprendiste
 
-- Cómo deployar un backend Node.js a producción.
-- Manejo de env vars en plataformas de hosting.
-- CORS en producción (restrictivo, no `*`).
-- Storytelling de un proyecto técnico para audiencia no-técnica.
-- Lo que separa "demo de aprendizaje" de "demo vendible".
+- Deploy de monorepo Node a producción.
+- Caddy como reverse proxy + HTTPS automático (zero-config).
+- Multi-service docker-compose con red interna.
+- Workflow completo de entrega Fiverr profesional.
+- Cómo presentar trabajo técnico a audiencia no-técnica.
 
 ## Trampas comunes
 
-- Olvidar restringir CORS y dejar el endpoint abierto al mundo → cualquiera puede usar tu API key contra tu cuenta.
-- Free tier de Render se duerme después de 15 min de inactividad → el primer request toma ~30s. Mencionalo en el README del demo público ("el primer mensaje puede tardar, el server está despertando").
-- Free tier de Gemini son ~15 req/min globales por API key. Si el demo recibe varias visitas a la vez, vas a ver 429s. Mencionalo en el README también, o configurá un mensaje amigable en el frontend ("muchos usuarios ahora mismo, intenta de nuevo en unos segundos").
-- README solo técnico → un cliente de Fiverr no entiende "Clean Architecture" ni "RAG". Tradúcelo a problemas de negocio.
-- Hardcodear URLs de localhost en el frontend → en prod no funciona y el debug toma horas.
-- No probar el demo después de cada cambio → el demo se rompe entre deploys y no te enterás.
+- DNS no propagado antes de levantar Caddy → Let's Encrypt falla.
+- Olvidar `expose` vs `ports` → API queda accesible públicamente sin pasar por Caddy.
+- Caddy sin acceso al volumen `packages/api/public` → 404 en widget assets.
+- Sin `depends_on` → api arranca antes que Chroma, falla `/health/ready` un rato.
+- Free tier de Gemini se quema si el demo público recibe muchas visitas → cuando vendas, cada cliente trae su propia API key.
+- Handover doc demasiado técnico → cliente no lo lee. Apunta a "1 página executive + detalles para nerds al final".
+- No grabar el Loom porque "después" → te ahorra horas de soporte post-venta.
 
-## Lo que viene después de esta épica
+## Lo que viene después
 
-Ya tenés algo vendible. Lo que sigue (fuera de scope de este workbook):
+Esta secuencia te dejó con:
+- Un demo vendible.
+- Un template reutilizable.
+- Un proceso de entrega profesional.
+- Material listo para Fiverr.
 
-- **Ofrecer en Fiverr**: armar perfil, gigs, pricing, packages, portfolio samples.
-- **Migrar a Claude (Anthropic) cuando tengas ingresos**: gracias a la abstracción con `LLMProvider` en Epic 02, es un cambio de minutos. Solo creás un `AnthropicLLMProvider` que implementa la misma interface y lo intercambias en el composition root.
-- **Mejoras de producto**: multi-tenant (un solo backend, varios clientes con sus propias bases), panel admin para que el cliente suba sus docs sin tocar código, integración a WhatsApp Business API.
-- **Otros canales de venta**: LinkedIn outreach a pymes locales, posts en grupos de Facebook de dueños de negocio, freelance platforms regionales.
+**Lo siguiente es vender, no construir más.** Resistí la tentación de meter features antes de tener clientes. Cuando tengas 3-5 gigs, ahí van a aparecer features que el mercado pidió. Ese es el momento de iterar.
 
-Pero eso ya es trabajo de venta y mejora iterativa, no de aprendizaje técnico. Esta secuencia te dejó con un demo demostrable y los skills para entregarle a un cliente lo que pida.
+Posibles iteraciones futuras (NO ahora):
+- Multi-tenant (1 instalación, varios clientes con sus propias bases).
+- Panel admin para que el cliente actualice docs sin SSH.
+- Canales adicionales (WhatsApp, Telegram, etc.).
+- Métricas / analytics del bot.
+- Switch de Gemini a Claude cuando tengas ingresos (gracias a `LLMProvider`, minutos).

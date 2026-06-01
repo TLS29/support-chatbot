@@ -1,4 +1,30 @@
+# Dependencies
 node_modules/
+**/node_modules/
+
+# Build outputs
 dist/
+**/dist/
+
+# Environment
 .env
+**/.env
+!.env.example
+!**/.env.example
+
+# OS
 .DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Vector DB data (Epic 02)
+chroma-data/
+
+# Caddy data (Epic 04)
+caddy-data/
+caddy-config/

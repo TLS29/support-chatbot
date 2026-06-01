@@ -1,201 +1,224 @@
 # Epic 02 — RAG (Retrieval-Augmented Generation)
 
-**Estimación:** 5-7 días.
+**Estimación:** 4-5 días.
 
-> ⚠️ **Antes de empezar esta épica, vuelve a la conversación de claude.ai donde planificamos este proyecto.** El concepto de RAG se explica mejor leyendo que en terminal, y queremos que tengas el modelo mental claro antes de implementar.
+> ⚠️ **Antes de empezar, vuelve a la conversación de claude.ai donde planificamos este proyecto.** El concepto de RAG (búsqueda semántica, embeddings, vector DB) se explica mejor leyendo que en terminal. Ahí cubrimos el modelo del "mapa de significados", por qué keyword search no sirve, embeddings, similitud coseno, y el ciclo retrieve → augment → generate.
 
 ## Goal
 
-Que el chatbot pueda responder preguntas sobre un negocio específico usando una base de conocimiento (FAQ, docs, info de productos) que le proveas. Ya no inventará respuestas — buscará en los documentos del cliente, le pasará el contexto al LLM, y el LLM responderá basándose en esa info.
+Que el chatbot pueda responder preguntas sobre un negocio específico usando una base de conocimiento. Ya no inventa — busca en los documentos del cliente, le pasa el contexto al LLM, el LLM responde basándose en esa info.
 
-**Esta es la épica más importante del proyecto.** Es el patrón que vas a aplicar en TODOS los gigs de soporte que vendas.
+**Esta es la épica más importante del proyecto.** Es el patrón que vas a aplicar en TODOS los gigs.
 
 ## Conceptos cubiertos
 
-- **Embeddings**: convertir texto en vectores numéricos que capturan significado.
-- **Vector database**: dónde guardar esos vectores para buscarlos rápido.
-- **Búsqueda semántica**: encontrar fragmentos relevantes por significado, no por palabras exactas.
-- **Chunking**: cómo partir documentos grandes en pedazos del tamaño correcto.
-- **Context injection**: cómo pegar los fragmentos relevantes al prompt antes de llamar al LLM.
-- **Clean Architecture aplicada**: refactorizar el código de las épicas anteriores a capas separadas (domain / application / infrastructure).
+- **Chunking**: cómo partir documentos en pedazos del tamaño correcto.
+- **Embeddings**: convertir texto en vectores que capturan significado.
+- **Vector database** (Chroma): dónde guardar vectores para buscarlos rápido.
+- **Búsqueda semántica**: encontrar fragmentos relevantes por significado.
+- **Context injection**: cómo pegar fragmentos al system prompt antes de llamar al LLM.
+- **Threshold de similitud**: cuándo decir "no sé".
 
 ## Pre-requisitos
 
-- Epic 01 completa.
-- Haber leído/conversado el concepto de RAG en la conversación de claude.ai (importante).
-- Docker corriendo en tu máquina (para Chroma).
+- Epic 01 completa (POST /api/chat funcionando con streaming).
+- Docker corriendo (necesario para Chroma).
 
 ## Tickets
 
-### 02.1 — Refactor a Clean Architecture
+### 02.1 — Chroma en docker-compose + health check
 
-Antes de agregar complejidad, refactoriza el código de Epic 01 a una estructura de capas:
+Agrega al `docker-compose.yml` raíz un nuevo servicio:
 
+```yaml
+chroma:
+  image: chromadb/chroma
+  ports: ["8000:8000"]   # en prod cambiamos a "expose" — ver Epic 04
+  volumes:
+    - chroma-data:/chroma/chroma
+  restart: unless-stopped
+
+volumes:
+  chroma-data:
 ```
-src/
-├── domain/             ← entidades del dominio (Message, Conversation, KnowledgeChunk)
-├── application/        ← casos de uso (SendMessageUseCase)
-├── infrastructure/     ← adapters (GeminiLLMProvider, GeminiEmbeddingProvider, ChromaKnowledgeRepository)
-└── interfaces/
-    └── cli/            ← REPL de consola actual
-```
 
-**Concepto clave:** en Epic 01 todo vivía en `index.ts`. Eso fue intencional para no sobre-ingeniar. Ahora que vas a meter embeddings + vector DB + búsqueda, sin Clean Arch el archivo se vuelve inmanejable. **Acabas de sentir el dolor que Clean Arch resuelve** — guardátelo mentalmente, es la lección más importante de esta épica.
+También agrega `depends_on: [chroma]` al servicio `api`.
 
-**Bonus práctico para tu situación:** abstraer el LLM detrás de una interface `LLMProvider` es lo que va a hacer que, el día que tengas ingresos y quieras migrar a Claude (Anthropic), el cambio sea de minutos: solo creás un `AnthropicLLMProvider` que implementa la misma interface y lo intercambias en el composition root. El resto del código no se entera.
+Agrega `CHROMA_URL` al schema de env (default `http://localhost:8000` para dev fuera de docker; en docker-compose usa `http://chroma:8000`).
 
-**Deep-dive a Claude Code:** _"Refactoriza el código actual a una estructura Clean Architecture con domain/application/infrastructure/interfaces. La conversación y los mensajes van en domain. La llamada al LLM se vuelve un adapter en infrastructure (LLMProvider interface en domain, GeminiLLMProvider en infrastructure). El caso de uso 'enviar mensaje' va en application. El REPL actual se mueve a interfaces/cli."_
+**Refactoriza `GET /health/ready`** para que ahora SÍ chequee Chroma — ese era el TODO de Epic 00. Si Chroma no responde en < 2s → 503 con detalle. Si OK → 200.
 
-### 02.2 — Preparar documentos de demo
+**Deep-dive a Claude Code:** _"Agrega servicio chroma a docker-compose.yml raíz con volumen persistente y depends_on para api. Agrega CHROMA_URL a packages/api/src/infrastructure/config/env.ts. Refactoriza GET /health/ready para chequear heartbeat de Chroma con timeout 2s, devolver 503 con detalle si falla, 200 si OK. Loggea cada chequeo."_
 
-Crea una carpeta `docs/` en la raíz del proyecto con documentos de un negocio ficticio (sugerencia: la misma pizzería de Epic 01). Mínimo 5 archivos `.md`:
+### 02.2 — Documentos de demo
 
-- `menu.md` — productos y precios
+Crea `docs/` en la raíz del repo (al nivel del `packages/`). Mínimo 5 archivos `.md` con info de pizzería ficticia:
+
+- `menu.md` — productos y precios concretos
 - `horarios.md` — horarios de atención
-- `envios.md` — políticas de envío y zonas
-- `pagos.md` — métodos de pago aceptados
+- `envios.md` — políticas y zonas de envío
+- `pagos.md` — métodos de pago
 - `contacto.md` — info de contacto y redes
 
-**Concepto clave:** estos son los "documentos del cliente" en un caso real. La calidad de las respuestas del bot depende directamente de la calidad de estos documentos. Esto es algo que vas a tener que enseñarle a tus clientes de Fiverr: si su info está mal escrita o incompleta, el bot va a ser malo.
+Llena cada uno con info inventada pero realista (precios específicos, zonas con nombre, horarios precisos).
 
-### 02.3 — Chunking de documentos
+**Concepto clave:** la calidad de las respuestas del bot depende directamente de la calidad de estos docs. Esto es lo que vas a tener que enseñarle a clientes de Fiverr.
 
-Implementa una función que tome un documento de texto y lo parta en "chunks" (fragmentos) de tamaño manejable. Estrategia simple: partir por párrafos, asegurando que cada chunk tenga entre 100 y 500 caracteres.
+### 02.3 — Chunking
 
-**Concepto clave:** los embeddings tienen un límite de tokens. Documentos enteros no caben. Y aunque cupieran, buscar "el chunk relevante" es mucho más preciso que buscar "el documento relevante". El tamaño del chunk es un tradeoff: chunks chicos = más precisión + menos contexto en cada uno; chunks grandes = más contexto + menos precisión.
+`packages/api/src/infrastructure/rag/chunker.ts`.
 
-**Deep-dive a Claude Code:** _"Implementa una función chunkText(text: string, maxSize: number): string[] que parta texto en chunks respetando límites de párrafo cuando es posible. Si un párrafo solo es más grande que maxSize, pártelo por oraciones. Tests unitarios opcionales pero recomendados."_
+Función `chunkText(text: string, maxSize: number = 500): string[]` que parte respetando límites de párrafo. Si un párrafo solo es más grande que `maxSize`, parte por oraciones.
+
+**Concepto clave:** chunks muy grandes pierden precisión; muy chicos pierden contexto. Para FAQs/info de negocio, 200-500 chars suele funcionar bien.
+
+**Deep-dive a Claude Code:** _"Implementa chunkText(text, maxSize) en packages/api/src/infrastructure/rag/chunker.ts. Respeta párrafos. Si párrafo > maxSize, parte por oraciones. Tests unitarios cubriendo: párrafos cortos, párrafos largos, edge cases (vacío, palabra única muy larga)."_
 
 ### 02.4 — Embeddings con Gemini
 
-Buena noticia: Gemini también ofrece embeddings gratis en el mismo SDK que ya tienes instalado. No necesitas SDK adicional ni segunda API key.
+Define interface en `packages/api/src/domain/rag/embedding-provider.ts`:
+```ts
+interface EmbeddingProvider {
+  embed(text: string): Promise<number[]>;
+}
+```
 
-Modelo recomendado: `gemini-embedding-001` (general availability, free tier).
-
-Implementa una interface `EmbeddingProvider` en `domain/` con un método `embed(text: string): Promise<number[]>`, y una implementación `GeminiEmbeddingProvider` en `infrastructure/`:
+Implementa `GeminiEmbeddingProvider` en `packages/api/src/infrastructure/rag/`. Usa el SDK que ya tienes:
 
 ```ts
 const result = await ai.models.embedContent({
   model: 'gemini-embedding-001',
   contents: text
 });
-// result.embeddings[0].values es el vector (array de números)
+return result.embeddings[0].values;
 ```
 
-**Concepto clave:** un "embedding" es un vector de números que representa el significado de un texto. Dos textos con significado parecido tienen vectores cercanos en el espacio vectorial. Por eso "¿hacen envíos a Monterrey?" y "envíos a Nuevo León" se encuentran como similares aunque no compartan palabras exactas.
+Errores: 429 → `EmbeddingRateLimitError`; otros → `EmbeddingUnavailableError` (en `packages/api/src/domain/rag/errors.ts`).
 
-**Deep-dive a Claude Code:** _"Crea la interface EmbeddingProvider en domain/ con un método embed(text). Implementa GeminiEmbeddingProvider en infrastructure/ usando el método embedContent del cliente @google/genai ya configurado (misma instancia que usás para el LLM). Modelo: gemini-embedding-001. Maneja errores como en Epic 01."_
+**Concepto clave:** un embedding es un vector que representa significado. Dos textos similares en significado → vectores cercanos. La interface en domain te permite cambiar de Gemini a Voyage/OpenAI/local sin tocar el resto.
 
-### 02.5 — Vector store con Chroma
+**Deep-dive a Claude Code:** _"Crea EmbeddingProvider interface en packages/api/src/domain/rag/. Implementa GeminiEmbeddingProvider en packages/api/src/infrastructure/rag/ usando el GoogleGenAI existente. Modelo gemini-embedding-001. EmbeddingRateLimitError + EmbeddingUnavailableError en packages/api/src/domain/rag/errors.ts."_
 
-Levanta Chroma vía Docker:
+### 02.5 — KnowledgeRepository con Chroma
 
+```bash
+pnpm --filter api add chromadb
 ```
-docker run -d --name chroma -p 8000:8000 chromadb/chroma
+
+Interface en `packages/api/src/domain/rag/knowledge-repository.ts`:
+```ts
+type KnowledgeChunk = { text: string; embedding: number[]; metadata: { source: string } };
+type KnowledgeSearchResult = { text: string; metadata: { source: string }; score: number };
+
+interface KnowledgeRepository {
+  add(chunks: KnowledgeChunk[]): Promise<void>;
+  search(queryEmbedding: number[], topK: number): Promise<KnowledgeSearchResult[]>;
+}
 ```
 
-Instala el cliente JS: `pnpm add chromadb`.
+Implementa `ChromaKnowledgeRepository` en `packages/api/src/infrastructure/rag/`:
+- Conecta a `env.CHROMA_URL`.
+- Crea (si no existe) colección `support-knowledge`.
+- `add` inserta chunks con embeddings + metadata.
+- `search` hace nearest-neighbor con cosine similarity. Score = `1 - distance`.
 
-Implementa un repositorio `KnowledgeRepository` (interface en domain, implementación en infrastructure) con dos métodos:
-
-- `add(chunks: { text: string; embedding: number[]; metadata: { source: string } }[]): Promise<void>`
-- `search(queryEmbedding: number[], topK: number): Promise<{ text: string; metadata: any; score: number }[]>`
-
-**Concepto clave:** Chroma es una base de datos diseñada para buscar vectores por proximidad. Le das un vector y te devuelve los K vectores más cercanos (los K chunks más relevantes a tu query). No hace nada mágico — es matemática de distancia (coseno o euclideana) sobre vectores.
-
-**Deep-dive a Claude Code:** _"Define KnowledgeRepository interface en domain/. Implementa ChromaKnowledgeRepository en infrastructure/ usando el cliente de chromadb. Crea una colección llamada 'support-knowledge' si no existe. Implementa add() y search(). El search debe devolver score de similitud junto con cada resultado."_
+**Deep-dive a Claude Code:** _"Define KnowledgeRepository en packages/api/src/domain/rag/. Implementa ChromaKnowledgeRepository en packages/api/src/infrastructure/rag/ usando chromadb. Colección support-knowledge. add/search. score = 1 - distance. Errores con DomainError correspondiente."_
 
 ### 02.6 — Script de ingesta
 
-Crea un script `scripts/ingest.ts` que se invoca con `pnpm ingest` y:
+Crea `scripts/ingest.ts` (en raíz del repo, fuera de packages).
 
-1. Lee todos los archivos `.md` de `docs/`.
-2. Los parte en chunks (función del ticket 02.3).
-3. Genera embedding para cada chunk (servicio del ticket 02.4).
-4. Los inserta en Chroma con metadata (`source: 'menu.md'`, etc.).
+Configura para que corra en el contexto del api package. Agrega al `packages/api/package.json`:
+```json
+"ingest": "tsx ../../scripts/ingest.ts"
+```
 
-Imprime progreso en consola: cuántos archivos, cuántos chunks generados, cuántos insertados.
+Desde raíz: `pnpm ingest` (delega).
 
-**Concepto clave:** la ingesta es un proceso separado del runtime del chatbot. La haces una vez al inicio (o cuando el cliente actualice sus docs). El chatbot solo hace búsquedas — no genera embeddings cada vez.
+El script:
+1. Lee todos los `.md` de `docs/`.
+2. Chunkea cada uno (función del 02.3).
+3. Por cada chunk: genera embedding (02.4), **delay ~4s** entre cada uno para no pegar el rate limit.
+4. Inserta en Chroma (02.5) con metadata `{ source: 'menu.md' }`.
 
-**Cuidado con el rate limit:** generar embeddings para muchos chunks puede pegarte contra los ~15 req/min del free tier. Si tenés muchos chunks, agregá un pequeño `setTimeout` entre cada embedding (~4 segundos) o procesalos en lotes con pausa entre lotes.
+Imprime progreso (archivo X de Y, chunk N de M).
 
-**Deep-dive a Claude Code:** _"Crea scripts/ingest.ts que lea todos los archivos .md de docs/, los chunkee, genere embeddings con GeminiEmbeddingProvider, y los inserte en Chroma. Imprime progreso. Agregá un delay de ~4 segundos entre embeddings para respetar el rate limit del free tier de Gemini. Agregá 'ingest': 'tsx scripts/ingest.ts' a package.json."_
+**Concepto clave:** la ingesta es proceso separado del runtime. La haces una vez (o cuando el cliente actualice sus docs). El chatbot solo hace búsquedas.
 
-### 02.7 — Integrar búsqueda al flujo del chatbot
+**Cuidado:** sin el delay de 4s te tira 429 a mitad del proceso.
 
-Modifica el caso de uso `SendMessageUseCase`:
+**Deep-dive a Claude Code:** _"Crea scripts/ingest.ts en raíz del repo. Lee docs/, chunkea, genera embeddings con GeminiEmbeddingProvider con delay 4s entre cada uno, inserta en Chroma con metadata source. Imprime progreso. Agrega 'ingest': 'tsx ../../scripts/ingest.ts' a packages/api/package.json."_
 
-1. Genera embedding del mensaje del usuario.
-2. Busca top-3 chunks relevantes en Chroma.
-3. Pega esos chunks a la system instruction como contexto.
-4. Llama al LLM con la system instruction enriquecida.
+### 02.7 — Integrar RAG al SendMessageUseCase
 
-Estructura sugerida de la system instruction:
+Modifica `packages/api/src/application/send-message-use-case.ts`:
+
+Constructor agrega:
+- `embeddingProvider: EmbeddingProvider`
+- `knowledgeRepository: KnowledgeRepository`
+
+En `execute`, antes de llamar al LLM:
+1. Embed del mensaje del usuario.
+2. Search top-3 chunks.
+3. Construye system instruction enriquecida:
 
 ```
-Eres el bot de soporte de Pizzería La Italiana.
+{SYSTEM_PROMPT_BASE}
 
 INFORMACIÓN RELEVANTE:
 ---
-[chunk 1]
+{chunk 1}
 ---
-[chunk 2]
+{chunk 2}
 ---
-[chunk 3]
+{chunk 3}
 ---
 
 INSTRUCCIONES:
-- Responde SOLO usando la INFORMACIÓN RELEVANTE.
-- Si la pregunta no se puede contestar con esa info, di "no tengo esa información, déjame conectarte con un humano".
-- No inventes datos. No alucines. Si no estás 100% seguro, di que no sabes.
+- Responde SOLO con la INFORMACIÓN RELEVANTE.
+- Si no se puede contestar con esa info, di "no tengo esa información, déjame conectarte con un humano".
+- No inventes. Si no estás 100% seguro, di que no sabes.
 ```
 
-Agrega un modo debug (variable de entorno `DEBUG=true`) que imprima en consola los chunks recuperados antes de la respuesta, para verificar que la búsqueda funciona bien.
+4. Llama LLM con esa system instruction enriquecida.
 
-**Concepto clave:** esto es RAG en su forma más pura. Buscas, inyectas, generas. El LLM no "sabe" del negocio — solo razona sobre el contexto que le pasaste.
+Modo debug (controlado por `env.LOG_LEVEL=debug`) imprime chunks recuperados con scores.
 
-**Deep-dive a Claude Code:** _"Modifica SendMessageUseCase para que: 1) genere embedding del mensaje del usuario, 2) busque top-3 chunks en KnowledgeRepository, 3) construya una system instruction que incluya esos chunks como contexto, 4) llame al LLMProvider con esa system instruction enriquecida. Si DEBUG=true, imprime los chunks recuperados con sus scores antes de la respuesta."_
+**Deep-dive a Claude Code:** _"Modifica SendMessageUseCase para inyectar embeddingProvider y knowledgeRepository. En execute, antes del LLM: embed del mensaje, search top-3, construye system instruction enriquecida con chunks + instrucciones anti-alucinación, llama LLM con esa instruction. Loggea chunks recuperados con scores en log level debug."_
 
-### 02.8 — Manejo de "no sé" y threshold de similitud
+### 02.8 — Threshold de similitud
 
-Prueba el bot. Verifica que:
+Agrega `SIMILARITY_THRESHOLD` al env (default 0.3).
 
-- Cuando preguntas algo que SÍ está en los docs (precios, horarios, etc.), responde correctamente.
-- Cuando preguntas algo que NO está en los docs (ej. "¿quién es el presidente de México?"), dice "no tengo esa información".
+En el use case, después de search: si top score < threshold, **no llames al LLM**. Yields directamente: *"No tengo esa información, déjame conectarte con un humano."*
 
-Si está alucinando (inventando respuestas), refuerza la system instruction y agrega un threshold de similitud: si el score del top result es menor a 0.3 (ajusta según veas), no llames al LLM — devuelve directamente "no tengo esa información".
+**Concepto clave:** este es **el problema #1** para clientes de Fiverr. Defense in depth: instrucciones fuertes + threshold + opcional validación posterior.
 
-**Concepto clave:** este es **el problema #1** que vas a resolver para tus clientes de Fiverr. Un bot que alucina es peor que no tener bot. Hay varias técnicas combinadas: instrucciones fuertes en la system instruction + threshold de similitud + opcionalmente, validación posterior.
-
-**Deep-dive a Claude Code:** _"Refuerza la system instruction para reducir alucinaciones (instrucciones más estrictas). Adicionalmente, implementa un threshold: si el score del top result es menor a 0.3, no llames al LLM — devuelve directamente 'no tengo esa información, ¿quieres que te conecte con un humano?'. Imprime el score en modo debug para calibrar."_
+**Deep-dive a Claude Code:** _"Agrega SIMILARITY_THRESHOLD a env (default 0.3). En SendMessageUseCase, después de search: si top score < threshold, no llames al LLM — yields el mensaje 'no tengo esa información' directamente. Loggea cuándo dispara el short-circuit (debug)."_
 
 ## Definition of Done
 
-- [ ] Código refactorizado a Clean Architecture (capas separadas, dependencias en orden correcto: domain no importa nada, application solo de domain, infrastructure de ambas)
-- [ ] 5+ documentos de demo cargados en `docs/`
-- [ ] `pnpm ingest` corre y mete todo en Chroma sin error
-- [ ] El bot responde correctamente preguntas que SÍ están en los docs (menú, horarios, etc.)
-- [ ] El bot dice "no sé" para preguntas que NO están en los docs
-- [ ] Modo `DEBUG=true` muestra los chunks recuperados (verificación visual de que la búsqueda es razonable)
+- [ ] Chroma corre en docker-compose y `/health/ready` lo chequea real
+- [ ] 5+ documentos demo en `docs/`
+- [ ] `pnpm ingest` corre completo sin error
+- [ ] `POST /api/chat` con preguntas en los docs → responde con info correcta
+- [ ] `POST /api/chat` con preguntas fuera de los docs → "no sé"
+- [ ] Threshold funciona (verificar con preguntas borderline)
+- [ ] Log level debug muestra chunks recuperados con scores
+- [ ] `pnpm lint:deps` sigue pasando
 - [ ] Commits por ticket
 
 ## Lo que aprendiste
 
-- Qué son embeddings y cómo capturan significado.
-- Cómo funciona una vector DB (distancia entre vectores).
 - Patrón completo de RAG: chunk → embed → store → query embed → search → inject → generate.
-- Clean Architecture aplicada a un caso real (no académico).
-- Por qué una buena system instruction + buenos docs + threshold de similitud > simplemente un LLM más grande.
-- Cómo abstraer providers detrás de interfaces para poder cambiar de Gemini a Claude (Anthropic) o cualquier otro en el futuro sin tocar la lógica de negocio.
+- Por qué un buen system prompt + buenos docs + threshold > simplemente un LLM más grande.
+- Cómo abstraer providers detrás de interfaces para poder cambiar después.
 
 ## Trampas comunes
 
-- Chunks demasiado grandes → pierdes precisión en la búsqueda (un chunk gigante "matchea" todo).
-- Chunks demasiado chicos → pierdes contexto (el LLM ve fragmentos sin coherencia).
-- Olvidar la metadata al insertar → luego no sabes de qué doc viene la respuesta.
-- No re-ingestar después de actualizar los docs → el bot responde con info vieja.
-- Hardcodear el contexto en la system instruction en lugar de inyectarlo dinámicamente → perdés la magia de RAG.
-- Confiar en que el LLM "no inventará" solo porque le dijiste en la system instruction. Necesitás **instrucciones fuertes Y threshold de similitud**. Es defense in depth.
-- No probar con preguntas off-topic deliberadamente. El bot debería decir "no sé" — si responde igual con confianza, está alucinando.
-- Hacer la ingesta sin delay entre embeddings → te tira `429 Too Many Requests` a mitad del proceso y te toca volver a empezar.
+- Chunks demasiado grandes/chicos → precisión vs contexto.
+- Olvidar metadata al insertar → no sabes de qué doc viene la respuesta.
+- No re-ingestar después de actualizar docs → info vieja.
+- Confiar solo en system instruction para evitar alucinaciones → necesitas threshold además.
+- No probar preguntas off-topic deliberadamente.
+- Ingesta sin delay entre embeddings → 429 a mitad del proceso.

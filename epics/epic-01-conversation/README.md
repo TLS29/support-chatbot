@@ -1,167 +1,185 @@
-# Epic 01 — Conversación con LLM
+# Epic 01 — LLM API endpoint
 
-**Estimación:** 3-4 días.
+**Estimación:** 2-3 días.
 
 ## Goal
 
-Tener un chatbot de consola con el que puedas conversar de verdad: mantiene el contexto de mensajes anteriores, responde con una personalidad consistente vía system instruction, hace streaming de la respuesta, y maneja errores básicos.
+Tener `POST /api/chat` funcionando end-to-end: recibe un mensaje del usuario, mantiene memoria de conversación por sesión, llama a Gemini con system prompt + historial, y stream-ea la respuesta al cliente.
 
-**Lo que NO hace todavía:** saber nada del negocio del cliente. Eso es lo que vas a agregar en Epic 02 con RAG. Por ahora el bot responde con conocimiento general del LLM.
+Al final, **cualquier cliente HTTP (curl, Postman, futuro widget) puede tener una conversación real con tu bot**.
 
 ## Conceptos cubiertos
 
-- **Cómo el LLM maneja "memoria"**: no la tiene. Tú le mandas el historial cada vez.
-- **System instruction**: el prompt que define personalidad, reglas, y comportamiento esperado.
-- **Streaming**: recibir la respuesta token por token mientras se genera.
-- **Manejo de errores**: rate limits, network errors, API errors.
+- **Domain entities**: Message, Conversation.
+- **Provider abstraction**: el LLM detrás de una interface, no acoplado a Gemini.
+- **Use case pattern**: lógica de negocio en `application/`, sin dependencias de framework.
+- **Shared types**: contratos HTTP en `packages/shared/` para reusar en el widget (Epic 03).
+- **Streaming HTTP responses** desde Express.
+- **Session memory** in-memory.
+- **Rate limiting**: protección contra abuso + respeto al free tier de Gemini.
 
 ## Pre-requisitos
 
-- Epic 00 completa.
+- Epic 00 completa (monorepo + Express base + Pino + zod operativos).
+
+Buena noticia: el system prompt que escribiste en `packages/api/src/_scratch.ts` (Pizzería La Italiana, anti-alucinación) **lo vamos a reusar**. Tenlo a mano.
 
 ## Tickets
 
-### 01.1 — Conversación single-turn desde argumento de CLI
+### 01.1 — Shared types: contratos HTTP
 
-Refactoriza el script de Epic 00 para que reciba el mensaje desde la línea de comandos en lugar de tenerlo hardcoded:
-
-```
-pnpm dev "¿Cuál es la capital de Francia?"
-```
-
-Si no se pasa argumento, imprime un usage hint y sale con código 1.
-
-**Concepto clave:** todavía sin memoria. Cada invocación es independiente. Sentí esto antes de agregarle memoria — para entender qué problema resuelve el historial.
-
-**Deep-dive a Claude Code:** _"Modifica src/index.ts para que reciba el mensaje del usuario desde process.argv[2]. Si no hay argumento, imprime 'usage: pnpm dev \"tu mensaje\"' y sale con código 1."_
-
-### 01.2 — Modo interactivo con readline
-
-Cambia el flujo: en lugar de pasar el mensaje como argumento, abre un loop interactivo en consola donde el usuario escribe, el bot responde, y se vuelve a pedir otro mensaje. Termina con `exit` o Ctrl+C.
-
-Ejemplo de cómo se ve:
+En `packages/shared/src/`:
 
 ```
-> Hola
-< Hola! ¿En qué puedo ayudarte?
-> ¿Te acuerdas de mi nombre? Me llamo Jonathan.
-< Sí, claro Jonathan. ¿En qué puedo ayudarte?
-> ¿Cuál era mi nombre?
-< No tengo registro de tu nombre. ← acá ves el problema
+shared/src/
+├── chat-message.ts    → type ChatRole = 'user' | 'model'; type ChatMessage { role; text }
+├── api-contract.ts    → type ChatRequest { sessionId: string; message: string }
+└── index.ts           → re-export de los anteriores
 ```
 
-**Concepto clave:** sin memoria, el bot olvida instantáneamente. Esto es lo que vas a resolver en el siguiente ticket.
+**Concepto clave:** los tipos en `shared/` son **contratos HTTP** (DTOs). NO son las entidades del dominio del API — esas viven en `packages/api/src/domain/` y son privadas.
 
-**Deep-dive a Claude Code:** _"Convierte el script en un REPL interactivo usando el módulo readline de Node. Pide input al usuario en loop, manda al LLM, imprime respuesta. Cierra con 'exit' o Ctrl+C limpiamente."_
+¿Por qué la separación? Porque el widget (Epic 03) va a consumir `ChatRequest` para tipar su llamada al API. Si esos tipos vivieran en `packages/api/src/domain/`, el widget tendría que importar del package de api, lo cual rompe el principio de "el frontend no conoce el backend".
 
-### 01.3 — Agregar memoria de conversación
+**Deep-dive a Claude Code:** _"Crea packages/shared/src/chat-message.ts con ChatRole y ChatMessage. packages/shared/src/api-contract.ts con ChatRequest. packages/shared/src/index.ts que reexporta todo. Documenta la diferencia entre 'shared DTOs' (en shared/) y 'domain entities' (en api/domain/)."_
 
-Mantén un array con el historial de la conversación. En cada llamada al LLM, manda el historial completo, no solo el último mensaje. En Gemini, el formato del historial es:
+### 01.2 — Domain entities + interfaces (en api)
 
-```ts
-contents: [
-  { role: 'user', parts: [{ text: 'Hola' }] },
-  { role: 'model', parts: [{ text: '¡Hola! ¿En qué puedo ayudarte?' }] },
-  { role: 'user', parts: [{ text: 'Mi nombre es Jonathan' }] },
-  // ...
-]
-```
-
-**Importante:** en Gemini el rol del bot se llama `'model'`, NO `'assistant'` (como sería en OpenAI o Anthropic). Después de cada respuesta del modelo, agregás un turno `{ role: 'model', parts: [...] }` al array.
-
-Alternativamente, Gemini tiene un helper `ai.chats.create({ model, config })` que mantiene el historial automáticamente. Puedes usar cualquiera de los dos enfoques — empezar manual te hace ver el patrón claro; el helper es más limpio pero esconde el mecanismo.
-
-**Recomendación:** hacelo manual primero. Una vez que veas el array creciendo turno por turno, sabés exactamente qué está pasando bajo el capó.
-
-**Concepto clave:** esto es lo único que "da memoria" a un chatbot. El LLM sigue siendo stateless — somos nosotros los que le re-mandamos el contexto cada vez. Este es **el patrón fundamental** de todos los chatbots, no importa el provider.
-
-**Detalle a vigilar (no lo arregles ahora, solo anótalo):** el historial crece sin parar. En conversaciones largas puede pegar contra el límite de tokens del modelo. Más adelante hay que limitar el tamaño o resumir.
-
-**Deep-dive a Claude Code:** _"Agrega un array de historial al REPL en formato Gemini (role 'user' o 'model', parts con text). Mandalo completo en cada llamada generateContent. Después de cada respuesta, agrega el turno del modelo al historial. Imprime el largo del historial después de cada turno para visualizar cómo crece."_
-
-### 01.4 — System instruction para definir personalidad
-
-Agrega el campo `systemInstruction` dentro de `config` al `generateContent`. Esto NO es un mensaje en el array `contents` — es un campo aparte de la API. Empieza con algo simple:
+En `packages/api/src/`:
 
 ```
-Eres el bot de soporte de Pizzería La Italiana, una pizzería en Guadalajara.
-Hablas en español mexicano, con tono amable y casual.
-Si no sabes algo, dices "no tengo esa información, déjame conectarte con un humano".
+domain/
+├── conversation/
+│   ├── message.ts             → Message del dominio (puede o no ser igual al DTO de shared)
+│   ├── conversation.ts        → type Conversation { id; messages: Message[] }
+│   └── session-repository.ts  → interface SessionRepository
+└── llm/
+    ├── llm-provider.ts        → interface LLMProvider
+    └── errors.ts              → LLMRateLimitError, LLMUnavailableError (extends DomainError)
 ```
 
-Se pasa al SDK así:
+Nota sobre el role: usamos `'model'` (no `'assistant'`) porque es lo que Gemini usa. Si más adelante el adapter de Anthropic mapea internamente a `'assistant'`, no nos importa — el domain sigue siendo `'model'`.
 
-```ts
-const response = await ai.models.generateContent({
-  model: 'gemini-2.5-flash',
-  contents: historial,
-  config: {
-    systemInstruction: 'Eres el bot de soporte de...'
-  }
-});
+**Deep-dive a Claude Code:** _"Crea Message y Conversation en packages/api/src/domain/conversation/. Interface SessionRepository (get, save, appendMessage). Interface LLMProvider con chat(messages, systemPrompt) → AsyncIterable<string>. LLMRateLimitError y LLMUnavailableError en packages/api/src/domain/llm/errors.ts extendiendo DomainError."_
+
+### 01.3 — Infrastructure: GeminiLLMProvider
+
+Implementa `packages/api/src/infrastructure/llm/gemini-llm-provider.ts` que satisface `LLMProvider`.
+
+- Constructor recibe `GoogleGenAI` instance + `modelName` (default `gemini-2.5-flash-lite`).
+- Mapea `Message[]` del domain → `Content[]` de Gemini (con `parts`).
+- `generateContentStream` con `systemInstruction`.
+- Yields chunks de texto.
+- Errores: status 429 → `LLMRateLimitError`; otros → `LLMUnavailableError`.
+
+**Concepto clave:** este adapter es lo único en todo el proyecto que sabe que usas Gemini. Mañana migras a Claude: escribes `AnthropicLLMProvider` con la misma interface y lo intercambias en el composition root.
+
+**Deep-dive a Claude Code:** _"Implementa GeminiLLMProvider en packages/api/src/infrastructure/llm/. Constructor con DI manual (GoogleGenAI + modelName). Mapea Message[] del domain a Content[] de Gemini. generateContentStream con systemInstruction. Yields chunks. Maneja 429 → LLMRateLimitError; otros → LLMUnavailableError. Loggea con el structured logger."_
+
+### 01.4 — Infrastructure: InMemorySessionRepository
+
+`packages/api/src/infrastructure/sessions/in-memory-session-repository.ts`.
+
+- `Map<string, Conversation>`.
+- Métodos `get`, `save`, `appendMessage`.
+- Cap de historial vía `env.MAX_HISTORY_MESSAGES` (default 40). Si excede, descarta los más viejos.
+
+Agrega `MAX_HISTORY_MESSAGES` al schema de env.
+
+**Deep-dive a Claude Code:** _"Implementa InMemorySessionRepository en packages/api/src/infrastructure/sessions/. Map<string, Conversation>. Cap configurable vía MAX_HISTORY_MESSAGES (agregalo a env.ts, default 40). Si excede al appendear, descarta los más viejos."_
+
+### 01.5 — Application: SendMessageUseCase
+
+`packages/api/src/application/send-message-use-case.ts`.
+
+Constructor recibe (DI manual):
+- `LLMProvider`
+- `SessionRepository`
+- `systemPrompt: string`
+
+Método `execute({ sessionId, message }): AsyncIterable<string>`:
+
+1. Obtiene conversación de `sessionRepository.get(sessionId)` (crea si no existe).
+2. Appendea `{ role: 'user', text: message }`.
+3. Llama `llmProvider.chat(historial, systemPrompt)`, yields cada chunk.
+4. Acumula chunks en buffer.
+5. Al cerrar el stream: `appendMessage` con `{ role: 'model', text: buffer }`.
+
+**Concepto clave:** el use case es **lógica de negocio pura**. No sabe nada de Express, HTTP, ni Gemini. Si lo invocas desde un script CLI (sin Express), también funciona.
+
+**Deep-dive a Claude Code:** _"Implementa SendMessageUseCase en packages/api/src/application/. Constructor con DI manual: llmProvider, sessionRepository, systemPrompt. Método execute({sessionId, message}) devuelve AsyncIterable<string>: obtiene conversación, appendea user message, llama llmProvider.chat con historial completo, yields chunks acumulando buffer, al final appendea response completo."_
+
+### 01.6 — HTTP: zod schema + route POST /api/chat
+
+`packages/api/src/interfaces/http/routes/chat.ts`:
+
+1. **Schema zod** que valida el `ChatRequest` (importado de `@chatbot-soporte/shared`):
+   ```ts
+   import { ChatRequest } from '@chatbot-soporte/shared';
+   const ChatRequestSchema = z.object({
+     sessionId: z.string().uuid(),
+     message: z.string().min(1).max(2000)
+   }) satisfies z.ZodType<ChatRequest>;
+   ```
+2. **Handler**:
+   - Valida con zod (lanza ZodError → error handler central → 400).
+   - Llama `sendMessageUseCase.execute(...)`.
+   - Headers de streaming: `Content-Type: text/plain; charset=utf-8`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`.
+   - `for await` el AsyncIterable y `res.write(chunk)`.
+   - Al terminar: `res.end()`.
+   - Si el cliente desconecta (`req.on('close')`), loggea y deja morir el stream.
+
+Registra en `app.ts`: `app.post('/api/chat', chatRoute)`.
+
+**Concepto clave:** el `satisfies z.ZodType<ChatRequest>` valida en compile-time que tu schema zod corresponde con el tipo TS de shared. Si cambias el contrato en shared, el schema rompe al instante.
+
+**Deep-dive a Claude Code:** _"Crea packages/api/src/interfaces/http/routes/chat.ts. Import ChatRequest de @chatbot-soporte/shared. Define ChatRequestSchema con zod usando satisfies z.ZodType<ChatRequest> para garantizar consistencia. Handler valida, llama SendMessageUseCase, stream-ea respuesta (text/plain, no-cache, X-Accel-Buffering=no), maneja req.on('close'). Delega errores al handler central."_
+
+### 01.7 — Rate limit middleware
+
+```bash
+pnpm --filter api add express-rate-limit
 ```
 
-**Concepto clave:** la system instruction es lo que más diferencia un chatbot bueno de uno malo. Es donde le dices las reglas: tono, qué puede y qué no puede decir, cómo manejar dudas, cuándo escalar. **Aquí está el 50% del valor que entregas a un cliente de Fiverr** — saber escribir buenas system instructions.
+`packages/api/src/interfaces/http/middleware/rate-limit.ts`:
+- Configurable vía `env.RATE_LIMIT_PER_MIN` (agregar al schema, default 10).
+- Aplica solo a `/api/chat`, NO a healthchecks.
+- Al excederse: 429 con JSON `{ error: 'too many requests' }`.
+- Loggea cada vez que dispara.
 
-**Deep-dive a Claude Code:** _"Agrega el campo systemInstruction dentro de config en el call de generateContent. Hardcodea por ahora una system instruction para el bot de una pizzería ficticia. Debe enfatizar decir 'no sé' en lugar de inventar."_
+**Concepto clave:** rate limit cumple dos funciones:
+1. Anti-abuso.
+2. **Te protege del free tier de Gemini** (15 req/min). Si un bot crawler entra, lo absorbe el middleware antes de llegar a Gemini.
 
-### 01.5 — Streaming de respuestas
-
-Cambia el call de `ai.models.generateContent({ ... })` a `ai.models.generateContentStream({ ... })`. Lee los chunks a medida que llegan e imprímelos sin newline (`process.stdout.write(...)`). Al final del stream, agrega el mensaje completo al historial.
-
-```ts
-const stream = await ai.models.generateContentStream({ model, contents, config });
-
-let fullText = '';
-for await (const chunk of stream) {
-  const t = chunk.text;
-  if (t) {
-    process.stdout.write(t);
-    fullText += t;
-  }
-}
-// Agregar fullText al historial como { role: 'model', parts: [{ text: fullText }] }
-```
-
-**Concepto clave:** para una buena UX, el usuario no debería esperar 5 segundos para ver una respuesta completa. Streaming le muestra el texto a medida que se genera, igual que ChatGPT. Es un detalle de UX, pero es el que separa "demo de juguete" de "demo profesional" cuando un cliente ve tu bot.
-
-**Deep-dive a Claude Code:** _"Cambia generateContent a generateContentStream. Imprime cada chunk.text sin newline a medida que llega (usa process.stdout.write). Acumulá el texto completo en una variable y al cerrar el stream, guardalo en el historial como un turno 'model'."_
-
-### 01.6 — Manejo de errores básico
-
-Envuelve la llamada al LLM en un try/catch. Captura los errores que el SDK de Google puede tirar:
-
-- Errores HTTP (4xx, 5xx) — incluido `429 Too Many Requests` si pegás contra el rate limit del free tier.
-- Errores de red, timeouts.
-
-Imprime un mensaje amigable al usuario en lugar de un stack trace. **No mueras** — el REPL debe seguir aceptando input.
-
-**Concepto clave:** los rate limits del free tier de Gemini son ~15 requests por minuto. Si experimentás mucho seguido, vas a pegar contra ellos. En producción tendrías retry con backoff exponencial. Por ahora basta con manejarlos sin morir y avisar al usuario.
-
-**Deep-dive a Claude Code:** _"Envuelve el call al SDK en try/catch. Si el error tiene status 429 (rate limit) imprime un mensaje pidiendo paciencia (ej: 'demasiadas requests, esperá unos segundos'). Cualquier otro error: imprime mensaje genérico amigable. En ambos casos el REPL sigue vivo."_
+**Deep-dive a Claude Code:** _"Configura express-rate-limit en packages/api/src/interfaces/http/middleware/rate-limit.ts. RATE_LIMIT_PER_MIN del env (agregalo, default 10). Aplica solo a /api/chat. 429 con JSON al exceder. Loggea trigger con structured logger."_
 
 ## Definition of Done
 
-- [ ] REPL interactivo funciona (puedes mandar varios mensajes seguidos)
-- [ ] El bot recuerda mensajes anteriores dentro de una sesión
-- [ ] La system instruction define una personalidad consistente
-- [ ] Las respuestas se imprimen en streaming (texto aparece a medida que se genera)
-- [ ] Si la API falla, no muere el programa — imprime error y sigue
-- [ ] Al menos un commit por ticket (siguiendo conventional commits)
+- [ ] `POST /api/chat` con body `{ sessionId, message }` responde streaming
+- [ ] Múltiples mensajes en la misma `sessionId` recuerdan el historial
+- [ ] Body inválido → 400 con detalle zod
+- [ ] Gemini 429 → traducido a 5xx con mensaje friendly
+- [ ] Rate limit: request 11 en 1 min misma IP → 429
+- [ ] El use case se puede invocar desde un script de test sin Express y funciona — prueba de desacoplamiento
+- [ ] Logs muestran correlation ID en el flujo completo
+- [ ] `@chatbot-soporte/shared` exporta `ChatRequest` y `api` lo importa
+- [ ] `pnpm lint:deps` sigue pasando
+- [ ] Commits por ticket con scope
 
 ## Lo que aprendiste
 
-- Por qué el LLM "no tiene memoria" y cómo se le da memoria.
-- Cómo se estructura una buena system instruction para un caso real.
-- Diferencia entre `generateContent` y `generateContentStream`.
-- Manejo de errores del SDK.
-- Convenciones específicas de Gemini: `role: 'model'`, `parts: [{ text }]`, `systemInstruction` en `config`.
+- **Provider abstraction** real.
+- **Use case pattern** desacoplado de framework.
+- **Shared types entre packages** del monorepo.
+- **HTTP streaming** con Express.
+- **Validation en el boundary** con zod + `satisfies`.
+- **DI manual** en el composition root.
 
 ## Trampas comunes
 
-- Olvidar agregar la respuesta del modelo al historial → el bot se "amnesia" cada turno.
-- Usar `role: 'assistant'` en lugar de `role: 'model'` → Gemini falla porque ese role no existe. **Esto es lo que más confunde a quien viene de OpenAI o Anthropic.**
-- Meter la system instruction en el array `contents` con `role: 'system'` → en Gemini no existe ese role. La system instruction es un campo aparte (`config.systemInstruction`).
-- Hacer streaming sin acumular el texto en un buffer → terminás con un turno vacío en el historial.
-- Empezar a hardcodear conocimiento de negocio en la system instruction ("la pizza margarita cuesta $150") → eso es lo que vamos a resolver con RAG en Epic 02. La system instruction es para **personalidad y reglas**, NO para datos del negocio.
-- No manejar el error de `429 Too Many Requests` — con free tier de 15 req/min lo vas a ver más seguido de lo que crees mientras experimentás.
+- Meter Gemini directo en el route handler → pierdes toda la abstracción.
+- Validar con zod adentro del use case "por si acaso" → duplicas fuentes de verdad.
+- Acumular response completo antes de mandarlo al cliente → pierdes el streaming. `res.write(chunk)` por cada chunk.
+- Olvidar `Cache-Control: no-cache` → algunos proxies/browsers buffereaen todo antes del primer byte.
+- No manejar `req.on('close')` → el use case sigue tokenizando para un cliente que ya se fue.
+- Importar tipos del API desde shared "por ahora" → invierte la dirección de dependencia. shared NO conoce a api ni a widget.

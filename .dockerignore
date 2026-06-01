@@ -1,0 +1,28 @@
+# Dependencias — se reinstalan dentro de la imagen
+node_modules
+**/node_modules
+
+# Build outputs — se recompilan dentro de la imagen
+dist
+**/dist
+
+# Secretos / entorno — NUNCA dentro de la imagen.
+# docker-compose los inyecta vía env_file en runtime, no se hornean acá.
+.env
+**/.env
+!.env.example
+!**/.env.example
+
+# Git / IDE / OS
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# Docs — no se necesitan en runtime
+epics
+README.md
+
+# Logs
+*.log

@@ -1,0 +1,18 @@
+services:
+  api:
+    build:
+      # Context = raíz (necesita pnpm-workspace.yaml y packages/shared/).
+      # El Dockerfile vive dentro del package, pero se construye desde la raíz.
+      context: .
+      dockerfile: packages/api/Dockerfile
+    ports:
+      - "3000:3000"
+    # GEMINI_API_KEY y demás vienen de tu .env (inyectadas en process.env).
+    env_file: packages/api/.env
+    # Forzamos production: en development el logger usa pino-pretty, que es
+    # devDependency y NO está instalado en la imagen --prod → crashearía.
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+  # chroma se agrega en Epic 02
+  # caddy se agrega en Epic 04
