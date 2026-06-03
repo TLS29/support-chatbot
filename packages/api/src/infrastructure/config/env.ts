@@ -18,6 +18,8 @@ const schema = z.object({
       "Eres el bot de soporte de Pizzería La Italiana. Responde con tono amable. Si no sabes algo, di 'no tengo esa información, déjame conectarte con un humano'.",
     ),
   ALLOWED_ORIGINS: z.string().default("*"),
+  MAX_HISTORY_MESSAGES: z.coerce.number().int().positive().default(40),
+  RATE_LIMIT_PER_MIN: z.coerce.number().int().positive().default(10),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -35,6 +37,8 @@ export const env = {
   logLevel: parsed.data.LOG_LEVEL,
   systemPrompt: parsed.data.SYSTEM_PROMPT,
   allowedOrigins: parsed.data.ALLOWED_ORIGINS,
+  maxHistoryMessages: parsed.data.MAX_HISTORY_MESSAGES,
+  rateLimitPerMin: parsed.data.RATE_LIMIT_PER_MIN,
 } as const;
 
 export type Env = typeof env;

@@ -17,7 +17,7 @@ export function errorHandler(
   }
 
   if (err instanceof ZodError) {
-    logger.warn({ err }, "Validation error");
+    logger.warn({ fields: err.flatten().fieldErrors }, "Validation error");
     return res.status(400).json({
       code: "VALIDATION_ERROR",
       message: "Validation failed",

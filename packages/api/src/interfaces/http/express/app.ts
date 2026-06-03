@@ -6,8 +6,15 @@ import { requestLogger } from "./middlewares/requestLogger";
 import { DomainError } from "#domain/errors/DomainError";
 import { errorHandler } from "./middlewares/errorHandler";
 import { createHealthRouter } from "./routes/health";
+import { createChatRouter } from "./routes/chat";
+import type { SendMessageUseCase } from "#application/send-message-use-case";
+import { chatRateLimiter } from "./middlewares/rate-limit";
 
-const createApp = (): Express => {
+interface AppDependencies {
+  sendMessageUseCase: SendMessageUseCase;
+}
+
+const createApp = ({ sendMessageUseCase }: AppDependencies): Express => {
   const app = express();
   app.use(correlationIdMiddleware);
   app.use(helmet());
@@ -16,6 +23,7 @@ const createApp = (): Express => {
   app.use(requestLogger);
 
   app.use("/health", createHealthRouter());
+  app.use("/api/chat", chatRateLimiter, createChatRouter(sendMessageUseCase));
 
   app.use((req, _res, next) => {
     next(
