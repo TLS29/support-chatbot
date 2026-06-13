@@ -13,6 +13,19 @@ services:
     # devDependency y NO está instalado en la imagen --prod → crashearía.
     environment:
       - NODE_ENV=production
+      - CHROMA_URL=http://chroma:8000
     restart: unless-stopped
+    depends_on:
+      - chroma
   # chroma se agrega en Epic 02
+  chroma:
+    image: chromadb/chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    restart: unless-stopped
   # caddy se agrega en Epic 04
+
+volumes:
+  chroma-data:

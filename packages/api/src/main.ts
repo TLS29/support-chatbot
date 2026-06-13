@@ -6,15 +6,22 @@ import { env } from "#infrastructure/config/env";
 import { GeminiLLMProvider } from "#infrastructure/llm/gemini-llm-provider";
 import { InMemorySessionRepository } from "#infrastructure/sessions/in-memory-session-repository";
 import { SendMessageUseCase } from "#application/send-message-use-case";
+import { GeminiEmbeddingProvider } from "#infrastructure/rag/gemini-embedding-provider";
+import { ChromaKnowledgeRepository } from "#infrastructure/rag/chroma-knowledge-repository";
 import http from "node:http";
 
 const genAI = new GoogleGenAI({ apiKey: env.geminiApiKey });
 const llmProvider = new GeminiLLMProvider(genAI);
 const sessionRepository = new InMemorySessionRepository();
+const embeddingProvider = new GeminiEmbeddingProvider(genAI);
+const knowledgeRepository = new ChromaKnowledgeRepository();
+
 const sendMessageUseCase = new SendMessageUseCase(
   llmProvider,
   sessionRepository,
   env.systemPrompt,
+  embeddingProvider,
+  knowledgeRepository,
 );
 
 const app = createApp({ sendMessageUseCase });
@@ -23,6 +30,7 @@ const server = http.createServer(app);
 server.listen(env.port, () => {
   logger.info({ port: env.port, env: env.nodeEnv }, "Server started");
 });
+
 process.on("SIGTERM", () => {
   logger.info("SIGTERM signal received.");
   beginShutdown();

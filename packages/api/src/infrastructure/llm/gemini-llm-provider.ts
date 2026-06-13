@@ -10,15 +10,12 @@ export class GeminiLLMProvider implements LLMProvider {
     private readonly modelName = "gemini-2.5-flash-lite",
   ) {}
 
-  async *chat(
-    messages: Message[],
-    systemPrompt: string,
-  ): AsyncIterable<string> {
+  async *chat(messages: Message[], systemPrompt: string): AsyncIterable<string> {
     try {
       const stream = await this.genAI.models.generateContentStream({
         model: this.modelName,
         contents: this.toGeminiContents(messages),
-        config: { systemInstruction: systemPrompt },
+        config: { systemInstruction: systemPrompt, temperature: 0.1 },
       });
 
       for await (const chunk of stream) {
